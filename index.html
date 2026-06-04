@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>國語找字遊戲 v5.1</title>
+    <title>國語找字遊戲 v5.2</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
@@ -206,7 +206,7 @@
 </head>
 <body>
 
-    <div class="footer-version">大榮老師製作 © 2026 | Version 5.1 (v5.1)</div>
+    <div class="footer-version">大榮老師製作 © 2026 | Version 5.2 (v5.2)</div>
 
     <div id="init-loader">
         <i class="fas fa-circle-notch fa-spin text-5xl mb-4" style="color: var(--btn-blue)"></i>
@@ -223,9 +223,9 @@
                 <i class="fas fa-leaf text-5xl" style="color: var(--btn-green)"></i>
             </div>
             <h1 class="text-4xl font-black mb-2 tracking-wider">語詞探索遊戲</h1>
-            <p class="font-bold opacity-60 mb-6">歡迎，<span id="display-username" class="text-[var(--btn-blue)]"></span>！請選擇挑戰單元</p>
+            <!-- 👉 修正 1：移除使用者名稱顯示，讓大廳迎賓語更自然 -->
+            <p class="font-bold opacity-60 mb-6">歡迎挑戰！請選擇測驗單元</p>
             
-            <!-- 👉 新增：大廳的排行榜按鈕 -->
             <button onclick="openLeaderboardModal()" class="btn mb-8 w-full max-w-xs mx-auto" style="background: var(--btn-orange); box-shadow: 0 4px 0 var(--btn-orange-hover); font-size: 1.15rem; padding: 12px;">
                 <i class="fas fa-trophy text-yellow-100"></i> 全網排行榜
             </button>
@@ -455,9 +455,10 @@
         // 👉 新增：控制 5 篇短文測驗的狀態變數與全域資料
         let currentEssayRound = 1;
         let currentEssayList = [];
-        let currentUser = ""; // 儲存登入的使用者名稱
-        let globalLeaderboard = []; // 儲存從後端抓取的排行榜資料
-        let currentRankSort = 'score'; // 'score' 或 'time'
+        let currentUser = ""; 
+        let globalLeaderboard = []; 
+        let currentRankSort = 'score'; 
+        let pendingUnit = null; // 👉 新增：記錄學生想玩的單元，供登入後自動轉跳
 
         // 👉 將30色莫蘭迪色盤「強制交錯」排列，確保相鄰色系對比強烈，絕不撞色
         const earthTonePalette = [
@@ -543,32 +544,34 @@
             await new Promise(resolve => setTimeout(resolve, 500));
             document.getElementById('init-loader').style.display = 'none';
             
-            // 👉 修正：資料讀取完畢後，先顯示登入畫面，而非直接進大廳
-            document.getElementById('login-modal').classList.add('show');
+            // 👉 修正 1：一開始先顯示大廳，不強制登入
+            renderLobby();
         };
 
-        // 👉 新增：處理登入邏輯
+        // 👉 修正 1：處理登入邏輯，成功後自動轉跳想玩的關卡
         function handleLogin() {
             const rawInput = document.getElementById('username-input').value;
             const errorMsg = document.getElementById('login-error');
             
-            // 👉 修正 2：驗證格式並精確偵測是否包含特殊符號或空白
             const isValidFormat = /^\d{2}[\u4e00-\u9fa5]+$/.test(rawInput);
-            const hasSpecialChar = /[^\d\u4e00-\u9fa5]/.test(rawInput); // 若包含數字與中文以外的字元(含空白)
+            const hasSpecialChar = /[^\d\u4e00-\u9fa5]/.test(rawInput); 
             
             if (isValidFormat) {
                 currentUser = rawInput;
-                document.getElementById('display-username').innerText = currentUser;
                 document.getElementById('login-modal').classList.remove('show');
                 errorMsg.classList.add('hidden');
-                renderLobby();
+                
+                // 如果有待進入的關卡，直接轉跳
+                if (pendingUnit) {
+                    startGame(pendingUnit);
+                    pendingUnit = null;
+                }
             } else {
                 const btn = document.querySelector('#login-modal .btn');
                 btn.classList.remove('btn-shake');
                 void btn.offsetWidth;
                 btn.classList.add('btn-shake');
                 
-                // 根據錯誤類型給予精準提示
                 if (hasSpecialChar) {
                     errorMsg.innerText = "不可加入特殊符號(含空白)";
                 } else {
@@ -670,7 +673,7 @@
             return `${device} - ${browser}`;
         }
 
-        // 👉 新增：上傳成績到 GAS
+        // 👉 修正 2：上傳成績到 GAS (加入強制跟隨重定向與 3次重試機制)
         async function submitScoreToServer(finalScore, finalTime) {
             const now = new Date();
             const timestamp = now.getFullYear() + '/' + 
@@ -690,23 +693,35 @@
                 device: getDeviceBrowserInfo()
             };
 
-            try {
-                const response = await fetch(GAS_API_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify(payload)
-                });
-                
-                if (response.ok) {
-                    document.getElementById('upload-status').innerHTML = '<i class="fas fa-check-circle text-green-500"></i> 成績已成功上傳！';
-                    // 本地直接推入陣列，讓學生馬上在排行榜看到自己
-                    globalLeaderboard.push({ unit: currentLessonName, username: currentUser, time: finalTime, score: finalScore });
-                } else {
-                    throw new Error('Upload failed');
+            let uploadSuccess = false;
+
+            // 執行最多 3 次的上傳重試
+            for (let i = 0; i < 3; i++) {
+                try {
+                    const response = await fetch(GAS_API_URL, {
+                        method: 'POST',
+                        redirect: 'follow', // 強制跟隨 GAS 重新導向，解決 90% CORS 問題
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (response.ok) {
+                        document.getElementById('upload-status').innerHTML = '<i class="fas fa-check-circle text-green-500"></i> 成績已成功上傳！';
+                        // 本地直接推入陣列，讓學生馬上在排行榜看到自己
+                        globalLeaderboard.push({ unit: currentLessonName, username: currentUser, time: finalTime, score: finalScore });
+                        uploadSuccess = true;
+                        break; // 成功就跳出迴圈
+                    }
+                } catch (e) {
+                    console.warn(`成績上傳失敗，正在進行第 ${i+1} 次重試...`, e);
                 }
-            } catch (e) {
-                document.getElementById('upload-status').innerHTML = '<i class="fas fa-exclamation-triangle text-red-500"></i> 上傳失敗，請檢查網路。';
-                console.error("成績上傳失敗:", e);
+                
+                // 如果失敗且還沒到最後一次，等待 1 秒後重試
+                if (i < 2) await new Promise(r => setTimeout(r, 1000));
+            }
+
+            if (!uploadSuccess) {
+                document.getElementById('upload-status').innerHTML = '<i class="fas fa-exclamation-triangle text-red-500"></i> 上傳失敗，請檢查網路連線。';
             }
         }
 
@@ -811,7 +826,15 @@
 
         function returnToLobby() { stopTimer(); renderLobby(); }
 
+        // 👉 修正 1：開始遊戲前攔截登入狀態
         function startGame(unitName) {
+            // 如果還沒登入，跳出登入框並中斷進入遊戲
+            if (!currentUser) {
+                pendingUnit = unitName;
+                document.getElementById('login-modal').classList.add('show');
+                return;
+            }
+            
             currentLessonName = unitName;
             currentLessonData = allWordData.filter(item => item.unit === unitName);
             document.getElementById('game-title').innerText = unitName;
@@ -858,17 +881,18 @@
                 rightPanel.style.flex = '1';
                 rightPanel.style.height = 'auto';
             } else {
-                // 👉 修正：手機直向，棋盤滿版(寬度符合頁面)，並限制清單高度為三行
+                // 手機直向，棋盤滿版(寬度符合頁面)
                 const availableWidth = mainArea.clientWidth;
                 const size = availableWidth; 
                 
                 gridWrapper.style.width = size + 'px';
                 gridWrapper.style.height = size + 'px';
                 
-                // 設定語詞清單區最多顯示三行的高度 (標題列約45px + 三行語詞約140px + padding)
+                // 👉 修正 3：動態解放手機版容器高度。如果遊戲結束要顯示按鈕，就把框框拉長到 280px
                 rightPanel.style.flex = 'none';
-                rightPanel.style.height = '190px'; 
-                rightPanel.style.maxHeight = '190px';
+                let panelHeight = isEndGameTriggered ? '280px' : '190px'; 
+                rightPanel.style.height = panelHeight; 
+                rightPanel.style.maxHeight = panelHeight;
             }
 
             // 動態計算格子的字體大小，避免破版
@@ -1197,29 +1221,23 @@
         }
 
         function closeModal() {
-            // 👉 新增：強制測驗防護網
+            // 強制測驗防護網
             if (currentModalWord && !quizStatus[currentModalWord]) {
                 const quizBtn = document.getElementById('btn-ai-quiz');
-                
-                // 觸發重新繪製以確保動畫可以重複播放
                 quizBtn.classList.remove('btn-shake');
                 void quizBtn.offsetWidth; 
                 quizBtn.classList.add('btn-shake');
-                
-                // 動畫結束後移除，以便下次點擊又能震動
                 setTimeout(() => quizBtn.classList.remove('btn-shake'), 400);
-                
                 return; // 終止關閉視窗的動作
             }
 
             document.getElementById('learning-modal').classList.remove('show');
             currentModalWord = null;
             
-            // 👉 修正 1：移除直接呼叫 showGameOverModal 的邏輯，避免成績被切成兩筆
             if (foundWords.length === currentLessonData.length && Object.keys(quizStatus).length === currentLessonData.length && !isEndGameTriggered) {
                 isEndGameTriggered = true; // 鎖定狀態，避免重複觸發
                 
-                // 👉 修正 2：找字完成，計時結束
+                // 找字完成，計時結束
                 stopTimer();
                 
                 const essayBtn = document.getElementById('essay-btn-container');
@@ -1227,7 +1245,6 @@
                     essayBtn.classList.remove('hidden');
                     essayBtn.style.position = 'relative'; // 為絕對定位的箭頭做準備
                     
-                    // 👉 修正 3：動態加入顯眼的下一步指引，並將棋盤調暗凸顯按鈕
                     if (!document.getElementById('guide-arrow-el')) {
                         const arrowBox = document.createElement('div');
                         arrowBox.id = 'guide-arrow-el';
@@ -1248,6 +1265,9 @@
                     gridCont.style.opacity = '0.4';
                     gridCont.style.pointerEvents = 'none'; // 防止誤觸
                 }
+                
+                // 👉 修正 3：強制觸發一次版面重繪，確保手機版高度能及時長高顯示按鈕
+                setTimeout(() => { syncPanelHeight(); }, 50);
             }
         }
 
